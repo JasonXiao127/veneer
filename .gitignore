@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.tsbuildinfo
+frontend/dist/
+frontend/node_modules/
+backend/dist/
+backend/node_modules/
+.env
+*.local
+qb-config/
+downloads/
+veneer-data/
+data/
+.playwright-mcp/

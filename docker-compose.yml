@@ -1,0 +1,43 @@
+services:
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - WEBUI_PORT=8080
+    volumes:
+      - ./qb-config:/config
+      - ./downloads:/downloads
+    ports:
+      - "8080:8080"
+      - "6881:6881"
+      - "6881:6881/udp"
+    restart: unless-stopped
+
+  veneer:
+    build: .
+    container_name: veneer
+    environment:
+      - QB_URL=${QB_URL:-http://qbittorrent:8080}
+      - PORT=${PORT:-8081}
+      - HOST=${HOST:-0.0.0.0}
+      - SESSION_SECRET=${SESSION_SECRET:?set SESSION_SECRET in .env (openssl rand -hex 32)}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - TRUST_PROXY=${TRUST_PROXY:-false}
+      - COOKIE_SECURE=${COOKIE_SECURE:-false}
+      - PUBLIC_ORIGIN=${PUBLIC_ORIGIN:-}
+      - VENEER_COOKIE=${VENEER_COOKIE:-veneer_sid}
+      - SESSION_TTL_HOURS=${SESSION_TTL_HOURS:-24}
+      - RULES_FILE=${RULES_FILE:-./data/rules.json}
+      - RULES_INTERVAL_MIN=${RULES_INTERVAL_MIN:-5}
+    volumes:
+      - ./veneer-data:/app/data
+    ports:
+      # Host-side port must match container PORT (right side).
+      # (Dockerfile EXPOSE 8081 is documentation-only.)
+      - "${PORT:-8081}:${PORT:-8081}"
+    depends_on:
+      - qbittorrent
+    restart: unless-stopped

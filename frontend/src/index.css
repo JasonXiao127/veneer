@@ -1,0 +1,24 @@
+:root { color-scheme: dark; }
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+html, body, #root { margin: 0; padding: 0; }
+body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #0b0e14 /* = colors.bg in lib/theme.ts */; }
+input, select, textarea, button { font: inherit; }
+/* Placeholders: UA default grey is low-contrast on near-black — pin to muted. */
+::placeholder { color: #9ca3af /* = colors.muted in lib/theme.ts */; opacity: 1; }
+/* Replaced-down media keeps its aspect ratio; data tables are intentionally
+   excluded (virtualized widths + sticky headers manage their own sizing). */
+img, video { max-width: 100%; height: auto; }
+canvas, svg { max-width: 100%; }
+:focus-visible { outline: 2px solid #93c5fd /* = colors.focus in lib/theme.ts */; outline-offset: 2px; }
+/* NOTE (sticky/overflow decision): no page-level overflow-x hidden/clip on
+   html/body here. Any non-visible overflow on an ancestor breaks position:sticky,
+   and this app relies on sticky positioning (sticky table header `th{top:0}` in
+   lib/theme.ts, sticky SpeedBar `top:0`, sticky BulkBar `bottom:0`). Horizontal
+   containment must therefore be component-level (e.g. .vn-scrollx below), not global. */
+@media (max-width: 768px) {
+  /* Opt-in: stack a row container vertically on mobile. */
+  .vn-stack { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+  /* Opt-in: contained horizontal scroll with touch momentum for wide content. */
+  .vn-scrollx { display: block; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+}
