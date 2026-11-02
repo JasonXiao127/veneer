@@ -114,10 +114,13 @@ export function LogPanel({ maxHeight = "65vh" }: LogPanelProps) {
   // Poll the active tab every 5s. Interval is cleaned up on unmount / tab / pause change.
   // Auth failure stops polling (app shell handles re-login) instead of
   // dispatching veneer:unauthorized every 5s forever.
+  // The initial fetch always runs — even while paused — so switching tabs
+  // populates the newly shown pane instead of leaving it blank.
   useEffect(() => {
-    if (paused || authDead.current) return;
-    if (tab === "main") void fetchMain().then((dead) => { if (dead) authDead.current = true; });
-    else void fetchPeers().then((dead) => { if (dead) authDead.current = true; });
+    if (authDead.current) return;
+    const fetchTab = tab === "main" ? fetchMain : fetchPeers;
+    void fetchTab().then((dead) => { if (dead) authDead.current = true; });
+    if (paused) return;
     const t = window.setInterval(() => {
       if (authDead.current) {
         window.clearInterval(t);

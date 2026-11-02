@@ -41,6 +41,13 @@ export function AddDialog({
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    if (busy) return;
+    const hasUrls = urls.trim() !== "";
+    const hasFiles = !!files && files.length > 0;
+    if (!hasUrls && !hasFiles) {
+      setErr("Add a magnet/URL or choose at least one .torrent file.");
+      return;
+    }
     setBusy(true);
     setErr(null);
     try {
@@ -89,6 +96,13 @@ export function AddDialog({
         throw new Error("Session expired — please log in again");
       }
       if (!res.ok) throw new Error(await res.text().catch(() => `add failed (${res.status})`));
+      // qB answers 200 "Fails." when NOTHING was added (all URLs invalid,
+      // empty submission) — HTTP status alone would close the dialog as if
+      // the add had succeeded.
+      const bodyText = (await res.text().catch(() => "")).trim();
+      if (bodyText !== "" && bodyText !== "Ok." && !/^ok\.?$/i.test(bodyText)) {
+        throw new Error(bodyText.length <= 200 ? `qBittorrent refused the add: ${bodyText}` : "qBittorrent refused the add (nothing was added).");
+      }
       onDone();
       onClose();
     } catch (e) {

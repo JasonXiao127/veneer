@@ -150,6 +150,16 @@ export function TorrentTable({
     if (!siteOptions.some(([site]) => site === siteFilter)) setSiteFilter("all");
   }, [siteFilter, siteOptions, torrents.length]);
 
+  // Same stuck-select problem for the state filter: the paused*/stopped*
+  // options swap with isV5 (qB 4.x vs 5.x), so a version flip can orphan the
+  // selected value and filter everything out.
+  useEffect(() => {
+    if (stateFilter === "all") return;
+    const legacy = stateFilter === "pausedDL" || stateFilter === "pausedUP";
+    const modern = stateFilter === "stoppedDL" || stateFilter === "stoppedUP";
+    if ((isV5 === false && modern) || (isV5 !== false && legacy)) setStateFilter("all");
+  }, [stateFilter, isV5]);
+
   const columns = useMemo(
     () => [
       col.display({ id: "select", header: () => null, cell: () => null }),
@@ -195,8 +205,15 @@ export function TorrentTable({
           return `${(Math.max(0, Math.min(1, p)) * 100).toFixed(1)}%`;
         },
       }),
-      col.accessor("num_seeds", { header: "Seeds", cell: (c) => String(c.getValue() ?? 0) }),
-      col.accessor("num_leechs", { header: "Leeches", cell: (c) => String(c.getValue() ?? 0) }),
+      col.accessor("num_seeds", {
+        header: "Seeds",
+        // qB serializes unknown counters as -1 (e.g. pre-announce).
+        cell: (c) => (typeof c.getValue() === "number" && (c.getValue() as number) >= 0 ? String(c.getValue()) : "—"),
+      }),
+      col.accessor("num_leechs", {
+        header: "Leeches",
+        cell: (c) => (typeof c.getValue() === "number" && (c.getValue() as number) >= 0 ? String(c.getValue()) : "—"),
+      }),
       col.accessor("ratio", {
         header: "Ratio",
         // qB serializes unknown ratio as -1; official WebUI shows ∞ for that.
@@ -453,7 +470,9 @@ export function TorrentTable({
             }
             const t = item.row.original;
             const info = siteOfHash(t);
-            const pct = Math.max(0, Math.min(1, Number(t.progress ?? 0)));
+            // null/undefined progress is "unknown" (matches the desktop
+            // column); Number(null) would render a misleading 0.0%.
+            const p = typeof t.progress === "number" && Number.isFinite(t.progress) ? Math.max(0, Math.min(1, t.progress)) : null;
             const selected = sel.has(t.hash);
             return (
               <div
@@ -516,11 +535,11 @@ export function TorrentTable({
                     </span>
                     <TypeBadge kind={info.kind} />
                   </div>
-                  <div style={{ height: 6, borderRadius: 999, background: colors.border, overflow: "hidden" }} title={`${(pct * 100).toFixed(1)}%`}>
-                    <div style={{ width: `${(pct * 100).toFixed(1)}%`, height: "100%", background: colors.accent }} />
+                  <div style={{ height: 6, borderRadius: 999, background: colors.border, overflow: "hidden" }} title={p === null ? "unknown" : `${(p * 100).toFixed(1)}%`}>
+                    <div style={{ width: p === null ? "0%" : `${(p * 100).toFixed(1)}%`, height: "100%", background: colors.accent }} />
                   </div>
                   <div style={{ display: "flex", gap: 10, flexWrap: "wrap", color: colors.muted, fontSize: 12 }}>
-                    <span>{(pct * 100).toFixed(1)}%</span>
+                    <span>{p === null ? "—" : `${(p * 100).toFixed(1)}%`}</span>
                     <span>{String(t.state ?? "—")}</span>
                     <span>↓ {fmtSpeed(Number(t.dlspeed ?? 0))}</span>
                     <span>↑ {fmtSpeed(Number(t.upspeed ?? 0))}</span>

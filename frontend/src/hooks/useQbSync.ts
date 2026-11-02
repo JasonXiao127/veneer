@@ -98,13 +98,69 @@ export function mergeMainData(prev: SyncState, delta: MainDataDelta): SyncState 
 let lastRid = 0;
 let pollFails = 0;
 let syncGen = 0;
+// Request sequencing: concurrent refetches (poll tick + post-mutation
+// refetchSoon) can resolve out of order; an older response must never
+// overwrite newer state or move the rid cursor backwards.
+let reqSeq = 0;
+let appliedSeq = 0;
+
+/**
+ * Tracker ownership from the maindata `trackers` map (tracker URL ->
+ * torrent hashes). qB's per-torrent `tracker` field is only the first
+ * WORKING tracker and is empty when nothing is working, so without this map
+ * site attribution degrades to "unknown" plus a six-row prefetch.
+ */
+const trackerOwners = new Map<string, Set<string>>();
+
+function mergeTrackers(delta: MainDataDelta): void {
+  if (delta.full_update) trackerOwners.clear();
+  const added = asRecord(delta.trackers) as Record<string, unknown> | undefined;
+  if (added) {
+    for (const [url, hashes] of Object.entries(added)) {
+      if (typeof url !== "string" || url === "" || !Array.isArray(hashes)) continue;
+      const set = trackerOwners.get(url) ?? new Set<string>();
+      for (const h of hashes) if (typeof h === "string" && h !== "") set.add(h);
+      if (set.size > 0) trackerOwners.set(url, set);
+    }
+  }
+  for (const url of asStrings(delta.trackers_removed)) {
+    const set = trackerOwners.get(url);
+    trackerOwners.delete(url);
+    // A removed tracker must not resurrect via last-known attribution: drop
+    // the fallback for hashes left with no owned tracker at all.
+    if (set) {
+      for (const h of set) {
+        if (ownedTracker(h) === undefined) lastTrackerByHash.delete(h);
+      }
+    }
+  }
+  // Drop hashes that no longer exist so the map can't grow without bound.
+  if (delta.full_update && delta.torrents && typeof delta.torrents === "object") {
+    const live = new Set(Object.keys(delta.torrents));
+    for (const [url, set] of trackerOwners) {
+      for (const h of set) if (!live.has(h)) set.delete(h);
+      if (set.size === 0) trackerOwners.delete(url);
+    }
+  }
+}
+
+/** Any tracker URL qB attributes to this hash, or undefined. */
+function ownedTracker(hash: string): string | undefined {
+  for (const [url, set] of trackerOwners) {
+    if (set.has(hash)) return url;
+  }
+  return undefined;
+}
 
 export function resetSyncState(): void {
   syncGen++;
   lastRid = 0;
   pollFails = 0;
+  reqSeq = 0;
+  appliedSeq = 0;
   siteInfoCache.clear();
   lastTrackerByHash.clear();
+  trackerOwners.clear();
   clearTrackerCache();
   useSyncStore.setState({ torrents: {}, serverState: defaultServerState, categories: {}, tags: [], rid: 0, syncError: null });
 }
@@ -139,7 +195,9 @@ export function siteInfoFor(t: Torrent): SiteInfo {
       // a later TTL miss would resurrect it.
       if (!tracker) lastTrackerByHash.delete(t.hash);
     } else {
-      tracker = lastTrackerByHash.get(t.hash);
+      // Fall back to qB's maindata tracker map before the last-known URL:
+      // the map is authoritative for the current sync state.
+      tracker = ownedTracker(t.hash) ?? lastTrackerByHash.get(t.hash);
     }
   }
   if (tracker) {
@@ -203,6 +261,7 @@ function nextPollDelay(): number {
 export function useQbSync(paused: boolean) {
   const refetch = useCallback(async () => {
     const gen = syncGen;
+    const seq = ++reqSeq;
     try {
       const delta = await apiFetch<MainDataDelta>(`/api/qb/sync/maindata?rid=${lastRid}`);
       if (gen !== syncGen) return; // superseded by logout/reset — drop stale merge
@@ -212,10 +271,17 @@ export function useQbSync(paused: boolean) {
       if (!delta || typeof delta !== "object" || !validRid(delta.rid)) {
         throw new Error("Bad sync payload from server");
       }
+      // Out-of-order guard: a slower older response must not overwrite newer
+      // state or move the rid cursor backwards (rid wraps 1M->1, so sequence
+      // order — not rid order — decides).
+      if (seq <= appliedSeq) return;
       // Merge BEFORE committing the cursor: a malformed collection must throw
       // here so the delta is retried, not skipped forever.
       const merged = mergeMainData(useSyncStore.getState(), delta);
       if (gen !== syncGen) return;
+      if (seq <= appliedSeq) return;
+      appliedSeq = seq;
+      mergeTrackers(delta);
       lastRid = delta.rid;
       pollFails = 0;
       useSyncStore.setState({ ...merged, syncError: null });
@@ -246,6 +312,11 @@ export function useQbSync(paused: boolean) {
   useEffect(() => {
     if (paused) return;
     let alive = true;
+    const onAuthLost = (e: unknown) => {
+      if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+        window.dispatchEvent(new CustomEvent("veneer:unauthorized"));
+      }
+    };
     const tick = async () => {
       try {
         await refetch();
@@ -258,9 +329,16 @@ export function useQbSync(paused: boolean) {
       if (alive) timer = setTimeout(tick, nextPollDelay());
     };
     let timer = setTimeout(tick, 0);
+    // A hidden tab backs off to 10s+ polls; refetch immediately on return so
+    // the UI doesn't sit stale for up to a minute after switching back.
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && alive) void refetch().catch(onAuthLost);
+    };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       alive = false;
       clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [paused, refetch]);
 

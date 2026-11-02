@@ -31,6 +31,20 @@ const failMap = new Map<string, FailEntry>();
 // IP sails through untouched.
 const inflight = new Map<string, number>();
 
+function pruneFailMap(now: number): void {
+  for (const [k, v] of failMap) {
+    if (v.blockedUntil <= now && now - v.windowStart > FAIL_WINDOW_MS) failMap.delete(k);
+  }
+  // Bound memory by evicting oldest-first (Map preserves insertion order),
+  // never by locking out unknown IPs: a full map of live entries must not
+  // become a permanent global login denial.
+  while (failMap.size >= 5000) {
+    const oldest = failMap.keys().next();
+    if (oldest.done) break;
+    failMap.delete(oldest.value);
+  }
+}
+
 function failBlocked(key: string): boolean {
   // Concurrent burst on a clean IP: no failMap entry exists yet, but
   // in-flight attempts already count toward the threshold.
@@ -42,9 +56,10 @@ function failBlocked(key: string): boolean {
     else if (e.fails + (inflight.get(key) ?? 0) >= FAIL_THRESHOLD) return true;
     return false;
   }
-  // Fail closed under flood: an unknown key when the map is full is treated
-  // as blocked rather than growing memory without bound.
-  return failMap.size >= 5000;
+  // Unknown key: prune expired entries and evict oldest-first if still full,
+  // then allow the attempt through (rate limiting still applies).
+  pruneFailMap(Date.now());
+  return false;
 }
 
 function failRecord(key: string, success: boolean): void {
@@ -65,6 +80,13 @@ function failRecord(key: string, success: boolean): void {
       if (v.blockedUntil <= now && now - v.windowStart > FAIL_WINDOW_MS) failMap.delete(k);
       if (failMap.size <= 4000) break;
     }
+    // All remaining entries live: evict oldest-first rather than growing
+    // without bound.
+    while (failMap.size > 5000) {
+      const oldest = failMap.keys().next();
+      if (oldest.done) break;
+      failMap.delete(oldest.value);
+    }
   }
 }
 
@@ -76,12 +98,14 @@ function failRecord(key: string, success: boolean): void {
  * the backend is on :8081, and that split is legitimate same-origin dev use.
  *
  * Accepted hostnames:
- * - PUBLIC_ORIGIN (explicit allowlist for reverse-proxy deployments)
+ * - PUBLIC_ORIGIN when configured (authoritative explicit allowlist for
+ *   reverse-proxy deployments; the Host header is NOT accepted then, so a
+ *   DNS-rebinding host cannot bypass the allowlist)
  * - X-Forwarded-Host when TRUST_PROXY=true (nginx may rewrite Host to the
  *   upstream target, e.g. 127.0.0.1:8081 — trusting the forwarded host keeps
  *   login working without weakening direct-exposure mode). The proxy MUST
  *   overwrite X-Forwarded-Host; never pass a client-supplied value through.
- * - the Host header
+ * - the Host header (only when PUBLIC_ORIGIN is unset)
  */
 function hostnameOf(value: string): string {
   const v = value.trim();
@@ -99,19 +123,30 @@ function loginSameOrigin(req: FastifyRequest, env: Env): boolean {
   try {
     const o = new URL(Array.isArray(raw) ? raw[0] : raw);
     const candidates: string[] = [];
-    if (env.trustProxy) {
-      const xfh = req.headers["x-forwarded-host"];
-      const first = Array.isArray(xfh) ? xfh[0] : xfh;
-      if (first) candidates.push(first.split(",")[0]);
-    }
+    let publicHost: string | undefined;
     if (env.publicOrigin) {
       try {
-        candidates.push(new URL(env.publicOrigin).hostname);
+        publicHost = new URL(env.publicOrigin).hostname;
       } catch {
-        // ignore malformed PUBLIC_ORIGIN; Host still applies
+        // ignore malformed PUBLIC_ORIGIN; fall back to Host below
       }
     }
-    if (req.headers.host) candidates.push(req.headers.host);
+    if (publicHost) {
+      // Authoritative allowlist: Host alone must not satisfy the check.
+      candidates.push(publicHost);
+      if (env.trustProxy) {
+        const xfh = req.headers["x-forwarded-host"];
+        const first = Array.isArray(xfh) ? xfh[0] : xfh;
+        if (first) candidates.push(first.split(",")[0]);
+      }
+    } else {
+      if (env.trustProxy) {
+        const xfh = req.headers["x-forwarded-host"];
+        const first = Array.isArray(xfh) ? xfh[0] : xfh;
+        if (first) candidates.push(first.split(",")[0]);
+      }
+      if (req.headers.host) candidates.push(req.headers.host);
+    }
     const originHost = hostnameOf(o.hostname).toLowerCase();
     return candidates.some((c) => hostnameOf(c).toLowerCase() === originHost);
   } catch {
@@ -146,7 +181,7 @@ export async function registerSessionRoutes(app: FastifyInstance, env: Env, sess
       if (failBlocked(req.ip)) {
         return reply.code(429).send({ error: "Too many failed logins from this address. Try again later." });
       }
-      let result: { ok: boolean; sid?: QbSid; banned?: boolean; body?: string; status?: number };
+      let result: { ok: boolean; sid?: QbSid; banned?: boolean; body?: string; status?: number; unexpected?: boolean };
       inflight.set(req.ip, (inflight.get(req.ip) ?? 0) + 1);
       try {
         result = await loginQb(env.qbUrl, username, password);
@@ -171,6 +206,12 @@ export async function registerSessionRoutes(app: FastifyInstance, env: Env, sess
       // faults, not wrong passwords — do not burn the shared anti-ban brake.
       if (result.status !== undefined && result.status >= 400 && result.status !== 401 && result.status !== 403) {
         return reply.code(502).send({ error: `qBittorrent login failed (HTTP ${result.status}) — check QB_URL` });
+      }
+      if (result.unexpected) {
+        // 200 with an unrecognized body (proxy login page, captive portal,
+        // wrong QB_URL): config fault, not wrong passwords — 502 without
+        // burning the shared anti-ban brake.
+        return reply.code(502).send({ error: "qBittorrent login returned an unexpected response — check QB_URL" });
       }
       if (!result.ok) {
         failRecord(req.ip, false);
@@ -228,11 +269,13 @@ export async function registerSessionRoutes(app: FastifyInstance, env: Env, sess
     const s = sessions.get(id);
     if (s) {
       try {
-        await fetch(`${env.qbUrl}/api/v2/auth/logout`, {
+        const res = await fetch(`${env.qbUrl}/api/v2/auth/logout`, {
           method: "POST",
           headers: { Cookie: `${s.qbSid.name}=${s.qbSid.value}`, Referer: `${env.qbUrl}/` },
           signal: AbortSignal.timeout(10_000),
         });
+        // Drain so the connection can be reused.
+        await res.arrayBuffer().catch(() => undefined);
       } catch {
         // ignore — still clear local session
       }
@@ -284,6 +327,9 @@ export async function registerSessionRoutes(app: FastifyInstance, env: Env, sess
       reply.setCookie(env.veneerCookie, id!, { ...cookieOpts });
       return reply.send({ loggedIn: true, webapiVersion: s.webapiVersion, isV5: s.isV5 });
     } catch (err) {
+      // sessions.get() above already slid the server TTL, so slide the
+      // browser cookie here too — a long outage must not desync the two.
+      reply.setCookie(env.veneerCookie, id!, { ...cookieOpts });
       if (isTimeoutError(err)) return reply.code(504).send({ loggedIn: false, error: "qBittorrent timed out" });
       return reply.code(502).send({ loggedIn: false, error: "qBittorrent unreachable" });
     }

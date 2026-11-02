@@ -212,26 +212,35 @@ export function SearchPanel({ maxHeight = "65vh" }: { maxHeight?: string }) {
   const fetchSeq = useRef(0);
   const authDead = useRef(false);
   const loadingCount = useRef(0);
-  const jobsRef = useRef<SearchJob[]>([]);
-  jobsRef.current = jobs;
+  const wasRunningRef = useRef<Set<number>>(new Set());
 
-  // Initial status + plugin load; poll status every 2s only while a search runs.
+  // Initial status + plugin load; poll status every 2s. The status call is
+  // cheap and always runs: it drives silent result refresh while a search is
+  // running, fetches the FINAL results on a Running→Stopped transition, and
+  // discovers externally-started searches (no known-running job required).
   useEffect(() => {
     let cancelled = false;
     void fetchStatus();
     void fetchPlugins();
     const t = window.setInterval(() => {
       if (cancelled || authDead.current) return;
-      // Idle backoff: nothing to watch unless a known search is running. The
-      // initial load above still discovers externally-started searches.
-      if (!jobsRef.current.some((j) => j.status === "Running")) return;
       void fetchStatus().then((list) => {
         if (cancelled || !list || authDead.current) return;
-        if (!list.some((j) => j.status === "Running")) return;
         const sel = selRef.current;
-        if (sel.id === null) return;
-        const job = list.find((j) => j.id === sel.id);
-        if (job && job.status === "Running") void fetchResults(sel.id, sel.offset, true);
+        if (sel.id !== null) {
+          const job = list.find((j) => j.id === sel.id);
+          const wasRunning = wasRunningRef.current.has(sel.id);
+          if (job && job.status === "Running") {
+            void fetchResults(sel.id, sel.offset, true);
+          } else if (wasRunning && job) {
+            // The selected search stopped between polls: the last silent page
+            // is stale, so fetch the final results (non-silent applies).
+            void fetchResults(sel.id, sel.offset);
+          }
+        }
+        wasRunningRef.current = new Set(
+          list.filter((j) => j.status === "Running").map((j) => j.id),
+        );
       });
     }, POLL_MS);
     return () => {
@@ -290,6 +299,9 @@ export function SearchPanel({ maxHeight = "65vh" }: { maxHeight?: string }) {
     try {
       await qbPost("/api/qb/search/stop", { id: String(id) });
       await fetchStatus();
+      // A manual stop also ends result growth: refresh the final page when
+      // this search is selected.
+      if (selectedId === id) await fetchResults(id, offset);
     } catch (e) {
       emitUnauthorized(e);
       setJobsErr(errMsg(e, "stop failed"));
@@ -334,6 +346,12 @@ export function SearchPanel({ maxHeight = "65vh" }: { maxHeight?: string }) {
         throw new Error("Session expired — please log in again");
       }
       if (!res.ok) throw new Error((await res.text().catch(() => "")) || `add failed (${res.status})`);
+      // qB answers 200 "Fails." when nothing was added — an HTTP check alone
+      // would report success for a failed add.
+      const bodyText = (await res.text().catch(() => "")).trim();
+      if (bodyText !== "" && !/^ok\.?$/i.test(bodyText)) {
+        throw new Error(bodyText.length <= 200 ? `qBittorrent refused the add: ${bodyText}` : "qBittorrent refused the add (nothing was added).");
+      }
       setDownloadMsg(`Sent "${r.fileName}" to qBittorrent.`);
     } catch (e) {
       setDownloadErr(errMsg(e, "download failed"));

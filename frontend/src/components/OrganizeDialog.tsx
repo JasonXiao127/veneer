@@ -118,7 +118,17 @@ export function OrganizeDialog({
         {tags.map((t) => (
           <div key={t} style={row} className="vn-org-row">
             <span style={{ fontSize: 13, flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{t}</span>
-            <button style={btn} title={`Delete tag ${t}`} disabled={busy !== null} onClick={() => run(`tag:${t}`, () => deleteTags(t))}>
+            <button
+              style={btn}
+              title={`Delete tag ${t}`}
+              disabled={busy !== null}
+              onClick={() => {
+                // deleteTags removes the tag from EVERY torrent library-wide.
+                if (window.confirm(`Delete tag "${t}" from all torrents?`)) {
+                  void run(`tag:${t}`, () => deleteTags(t));
+                }
+              }}
+            >
               {busy === `tag:${t}` ? "…" : "Delete"}
             </button>
           </div>

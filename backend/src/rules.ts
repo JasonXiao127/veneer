@@ -243,10 +243,24 @@ export function siteOfTracker(tracker: unknown): string {
 
 export type TorrentKind = "private" | "public" | "unknown";
 
+/**
+ * Credential-token heuristic, mirroring the frontend (sites.ts) for qB
+ * versions that serialize no privacy flag. qB <5.0 has neither `private`
+ * nor `isPrivate` in /torrents/info, so without this every torrent on an
+ * older server classifies "unknown" and the default kind rules never match.
+ * Only ever promotes to "private"; never guesses "public".
+ */
+const PASSKEY_RE = /(?:\bpasskey\b|\bauthkey\b|\bapi[_-]?key\b|\btorrent[_-]?pass\b|[?&](?:uid|passkey|authkey)=)/i;
+
 /** qB ≥5.0 serializes the privacy flag as `private`; accept `isPrivate` as fallback. */
-export function kindOfTorrent(t: { private?: unknown; isPrivate?: unknown }): TorrentKind {
+export function kindOfTorrent(t: { private?: unknown; isPrivate?: unknown; tracker?: unknown }): TorrentKind {
   const v = t.private ?? t.isPrivate;
-  return v === true ? "private" : v === false ? "public" : "unknown";
+  if (v === true) return "private";
+  if (v === false) return "public";
+  // Flag absent (qB <5.0, or metadata not yet downloaded): a credentialed
+  // announce URL is still a strong private signal.
+  if (typeof t.tracker === "string" && PASSKEY_RE.test(t.tracker)) return "private";
+  return "unknown";
 }
 
 /** First-match-wins over enabled rules: site-exact, then kind, then global catch-all. */
@@ -267,7 +281,9 @@ export function ruleFor(rules: Rule[], kind: TorrentKind, site: string): Rule | 
 }
 
 /**
- * Dimension compliance. A torrent value of -2 means "use the global limit";
+ * Dimension compliance over the RAW per-torrent limit fields
+ * (`ratio_limit` / `seeding_time_limit` / `inactive_seeding_time_limit`).
+ * A torrent value of -2 means "use the global limit";
  * a rule value of -2 means "set use-global". So -2 only counts as compliant
  * when the rule also asks for -2 — otherwise it is drift and gets enforced.
  * Unknown/missing values are treated as compliant (never mass-rewrite on a
@@ -285,6 +301,15 @@ export interface QbTorrentInfo {
   tracker?: unknown;
   private?: unknown;
   isPrivate?: unknown;
+  /**
+   * Raw per-torrent limits (-2 = use global, -1 = unlimited). These are the
+   * fields enforcement must compare: `max_*` are the EFFECTIVE values with
+   * -2 already resolved against the global settings, so comparing a -2 rule
+   * against `max_*` never converges and re-applies every tick.
+   */
+  ratio_limit?: unknown;
+  seeding_time_limit?: unknown;
+  inactive_seeding_time_limit?: unknown;
   max_ratio?: unknown;
   max_seeding_time?: unknown;
   max_inactive_seeding_time?: unknown;
@@ -296,9 +321,9 @@ export function complianceOf(
 ): { ratioOk: boolean; timeOk: boolean; inactiveOk: boolean } {
   if (!rule) return { ratioOk: true, timeOk: true, inactiveOk: true };
   return {
-    ratioOk: dimOk(info.max_ratio, rule.ratioLimit),
-    timeOk: dimOk(info.max_seeding_time, rule.seedingTimeLimit),
-    inactiveOk: dimOk(info.max_inactive_seeding_time, rule.inactiveSeedingTimeLimit),
+    ratioOk: dimOk(info.ratio_limit, rule.ratioLimit),
+    timeOk: dimOk(info.seeding_time_limit, rule.seedingTimeLimit),
+    inactiveOk: dimOk(info.inactive_seeding_time_limit, rule.inactiveSeedingTimeLimit),
   };
 }
 
@@ -489,6 +514,10 @@ export async function registerRulesRoutes(app: FastifyInstance, env: Env, sessio
           site,
           kind,
           ruleId: rule ? rule.id : null,
+          // "managed" is reported separately from the limit flags: a torrent
+          // with no matching rule must not read as compliant, or an empty /
+          // corrupt rule set looks 100% green while enforcing nothing.
+          managed: rule !== undefined,
           compliant: { ratioOk: c.ratioOk, timeOk: c.timeOk, inactiveOk: c.inactiveOk },
         };
       });

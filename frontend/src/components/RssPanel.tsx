@@ -187,14 +187,16 @@ export function RssPanel({ maxHeight = "65vh" }: { maxHeight?: string }) {
     return () => window.clearInterval(t);
   }, [loadItems]);
 
-  async function mutate(key: string, fn: () => Promise<unknown>) {
+  async function mutate(key: string, fn: () => Promise<unknown>): Promise<boolean> {
     setBusy(key);
     setMutErr(null);
     try {
       await fn();
       await loadItems();
+      return true;
     } catch (e) {
       if (!unauthorized(e)) setMutErr(e instanceof Error ? e.message : "request failed");
+      return false;
     } finally {
       setBusy(null);
     }
@@ -350,7 +352,13 @@ export function RssPanel({ maxHeight = "65vh" }: { maxHeight?: string }) {
                   onClick={() => {
                     const dest = window.prompt(`Move "${r.path}" to (new full path):`, r.path);
                     if (dest && dest !== r.path) {
-                      void mutate(`move:${r.path}`, () => qbPost("/api/qb/rss/moveItem", { itemPath: r.path, destPath: dest }));
+                      const src = r.path;
+                      void mutate(`move:${src}`, async () => {
+                        await qbPost("/api/qb/rss/moveItem", { itemPath: src, destPath: dest });
+                        // Follow the selection: otherwise the article pane
+                        // keeps showing the old (now empty) path.
+                        if (selected === src) setSelected(dest);
+                      });
                     }
                   }}
                 >

@@ -169,6 +169,8 @@ export async function deleteTags(tags: string): Promise<string> {
 //   which is newline-separated). Only http/https/ftp schemes are accepted.
 // - editWebSeed takes `origUrl` (not `url`) + `newUrl`.
 // - editTracker takes `url` + `newUrl`; removeTrackers `urls` is |-separated.
+//   (qB 4.6/5.0/5.1 require `origUrl` instead of `url`, so both are sent —
+//   each generation ignores the unknown key.)
 // - addPeers takes `hashes` (plural, |-separated) + `peers` (host:port, |-sep).
 // - banPeers (transfer scope, bans GLOBALLY) takes `peers` (host:port, |-sep).
 
@@ -184,7 +186,7 @@ export async function renameFolder(hash: string, oldPath: string, newPath: strin
 
 /** Replace tracker `url` with `newUrl` on one torrent. */
 export async function editTracker(hash: string, url: string, newUrl: string): Promise<string> {
-  return qbPost("/api/qb/torrents/editTracker", { hash, url, newUrl });
+  return qbPost("/api/qb/torrents/editTracker", { hash, url, origUrl: url, newUrl });
 }
 
 /** Add web seeds. Multiple URLs are PIPE-separated in `urls`. Requires qB 5.0+. */

@@ -107,6 +107,10 @@ export async function registerQbProxy(app: FastifyInstance, env: Env, sessions: 
         if (upstream.status === 403) {
           // 403 = dead SID OR container-IP ban (indistinguishable). Preserve the
           // server session (a ban must not wipe everyone); the client re-logs in.
+          // Drain the body first so the connection can be reused — 403s arrive
+          // in storms (every client retrying a dead SID), exactly when pool
+          // exhaustion would hurt most.
+          await upstream.arrayBuffer().catch(() => undefined);
           // Slide the browser cookie with the server TTL (sessions.get above
           // already slid server-side) so a long ban doesn't desync the two.
           if (veneerId) {
@@ -118,14 +122,25 @@ export async function registerQbProxy(app: FastifyInstance, env: Env, sessions: 
         }
 
         const ct = upstream.headers.get("content-type") ?? "application/octet-stream";
+        // Bound buffered responses: API payloads are small, but an
+        // authenticated caller can request arbitrarily large exports/logs, and
+        // arrayBuffer() has no built-in limit.
+        const MAX_PROXY_RESPONSE_BYTES = 50 * 1024 * 1024;
+        const declared = upstream.headers.get("content-length");
+        if (declared !== null && Number(declared) > MAX_PROXY_RESPONSE_BYTES) {
+          await upstream.arrayBuffer().catch(() => undefined);
+          return reply.code(502).send({ error: "qBittorrent response too large" });
+        }
         let buf: Buffer;
         try {
-          // NOTE: buffered, not streamed — fine for API payloads; revisit if
-          // very large lists cause memory pressure.
+          // NOTE: buffered, not streamed — fine for API payloads under the cap.
           buf = Buffer.from(await upstream.arrayBuffer());
         } catch (err) {
           const code = isTimeoutError(err) ? 504 : 502;
           return reply.code(code).send({ error: code === 504 ? "qBittorrent timed out" : "qBittorrent unreachable" });
+        }
+        if (buf.byteLength > MAX_PROXY_RESPONSE_BYTES) {
+          return reply.code(502).send({ error: "qBittorrent response too large" });
         }
         // Forward SID rotation if qB set a new cookie (name-agnostic: 5.2 uses QBT_SID_<port>)
         const gsc = (upstream.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie;

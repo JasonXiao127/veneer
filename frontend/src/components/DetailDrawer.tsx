@@ -661,7 +661,18 @@ function TrackersTable({ trackers, hash, onChanged }: { trackers: TrackerEntry[]
                     >
                       Edit
                     </button>
-                    <button style={styles.btnSm} title={`Remove tracker ${t.url}`} disabled={busy} onClick={() => void mutate("remove", t.url)}>
+                    <button
+                      style={styles.btnSm}
+                      title={`Remove tracker ${t.url}`}
+                      disabled={busy}
+                      onClick={() => {
+                        // Detaching a tracker (possibly private) is not
+                        // undoable from here — it needs the exact announce URL.
+                        if (window.confirm(`Remove tracker?\n${t.url}`)) {
+                          void mutate("remove", t.url);
+                        }
+                      }}
+                    >
                       Remove
                     </button>
                   </span>
@@ -775,7 +786,16 @@ function WebseedsTable({ seeds, hash, onChanged }: { seeds: unknown; hash: strin
                     {url || "—"}
                   </td>
                   <td style={cell}>
-                    <button style={styles.btnSm} title={`Remove web seed ${url}`} disabled={busy || !url} onClick={() => void mutate("remove", url)}>
+                    <button
+                      style={styles.btnSm}
+                      title={`Remove web seed ${url}`}
+                      disabled={busy || !url}
+                      onClick={() => {
+                        if (window.confirm(`Remove web seed?\n${url}`)) {
+                          void mutate("remove", url);
+                        }
+                      }}
+                    >
                       Remove
                     </button>
                   </td>

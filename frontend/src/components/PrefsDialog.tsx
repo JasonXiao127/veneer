@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiError } from "../lib/api";
 import { getPreferences, setPreferences } from "../lib/qbActions";
 import {
@@ -15,6 +15,7 @@ import {
   checkLabel,
   colors,
   mutedText,
+  warnText,
 } from "../lib/theme";
 
 const TEXT_FIELDS = ["save_path", "temp_path"] as const;
@@ -85,15 +86,6 @@ export function PrefsDialog({ onClose, onDone }: { onClose: () => void; onDone: 
   const [advJson, setAdvJson] = useState("");
   const [advErr, setAdvErr] = useState<string | null>(null);
 
-  // Escape dismisses (overlay click already does; keyboard users need this).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -143,6 +135,43 @@ export function PrefsDialog({ onClose, onDone }: { onClose: () => void; onDone: 
     return false;
   }, [orig, form, checks, advJson]);
 
+  // Dirty-close guard: Escape / overlay click / Cancel confirm first when
+  // there are unsaved edits, so neither keyboard nor mouse users lose work.
+  const requestClose = useCallback(() => {
+    if (isDirty && !busy && !window.confirm("Discard unsaved preference changes?")) return;
+    onClose();
+  }, [onClose, isDirty, busy]);
+
+  // Escape dismisses (overlay click already does; keyboard users need this).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") requestClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [requestClose]);
+
+  // Keys also present in Advanced JSON: the advanced box wins at save time,
+  // so warn instead of silently discarding the form values.
+  const advOverlap = useMemo(() => {
+    if (advJson.trim() === "") return [] as string[];
+    try {
+      const parsed: unknown = JSON.parse(advJson);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+      const formKeys = new Set<string>([
+        ...TEXT_FIELDS,
+        "add_trackers",
+        ...INT_FIELDS,
+        ...FLOAT_FIELDS,
+        ...SELECT_FIELDS,
+        ...BOOL_FIELDS,
+      ]);
+      return Object.keys(parsed as Record<string, unknown>).filter((k) => formKeys.has(k));
+    } catch {
+      return [] as string[];
+    }
+  }, [advJson]);
+
   async function save() {
     if (!orig || busy) return;
     setErr(null);
@@ -171,7 +200,17 @@ export function PrefsDialog({ onClose, onDone }: { onClose: () => void; onDone: 
         if (raw === "") continue; // empty = skip
         if (raw !== strOf(orig[k])) {
           if (!/^-?\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) throw new Error(`${k} must be an integer`);
-          patch[k] = parseInt(raw, 10);
+          const num = parseInt(raw, 10);
+          // HTML min/max don't constrain typed input (no form submit), so
+          // enforce qB's domain here instead of sending values qB clamps or
+          // rejects into surprising behavior.
+          if ((k === "schedule_from_hour" || k === "schedule_to_hour") && (num < 0 || num > 23)) {
+            throw new Error(`${k} must be between 0 and 23`);
+          }
+          if (k === "listen_port" && (num < 1 || num > 65535)) {
+            throw new Error("listen_port must be between 1 and 65535");
+          }
+          patch[k] = num;
         }
       }
       for (const k of SELECT_FIELDS) {
@@ -223,7 +262,7 @@ export function PrefsDialog({ onClose, onDone }: { onClose: () => void; onDone: 
   const dis = busy || loading;
 
   return (
-    <div style={overlay} onClick={onClose}>
+    <div style={overlay} onClick={requestClose}>
       <div onClick={(e) => e.stopPropagation()} style={{ ...card, width: 560, maxHeight: "88vh" }} className="vn-dialog-card vn-prefs-card">
         <style>{prefsMobileCss}</style>
         <h3 style={dialogTitle}>Preferences</h3>
@@ -432,10 +471,16 @@ export function PrefsDialog({ onClose, onDone }: { onClose: () => void; onDone: 
               />
             </label>
             {advErr && <p style={errText}>{advErr}</p>}
+            {advOverlap.length > 0 && (
+              <p style={warnText}>
+                Advanced JSON overrides the form for: {advOverlap.join(", ")} — values entered above for{" "}
+                {advOverlap.length === 1 ? "this key" : "these keys"} will be ignored.
+              </p>
+            )}
 
             {err && <p style={errText}>{err}</p>}
             <div style={actionsStyle} className="vn-dialog-actions">
-              <button style={btn} onClick={onClose} disabled={busy}>Cancel</button>
+              <button style={btn} onClick={requestClose} disabled={busy}>Cancel</button>
               <button style={btnPrimary} onClick={() => void save()} disabled={busy || !isDirty}>
                 {busy ? "Saving…" : "Save"}
               </button>

@@ -39,6 +39,8 @@ interface StatusEntry {
   site: string;
   kind: string;
   ruleId: string | null;
+  /** False when no rule matched: shown as unmanaged, never as compliant. */
+  managed?: boolean;
   compliant: { ratioOk: boolean; timeOk: boolean; inactiveOk: boolean };
 }
 
@@ -46,9 +48,11 @@ interface ApplyResult {
   applied: number;
   skipped: number;
   failed: number;
+  matched?: number;
 }
 
 function isCompliant(s: StatusEntry): boolean {
+  if (s.managed === false) return false;
   return s.compliant.ratioOk && s.compliant.timeOk && s.compliant.inactiveOk;
 }
 
@@ -59,7 +63,10 @@ function emitUnauthorized(): void {
 }
 
 function isAuthError(e: unknown): boolean {
-  return e instanceof ApiError && (e.status === 401 || e.status === 403);
+  // 401 only: the backend deliberately returns 403 (not 401) when qB itself
+  // refuses — dead SID or container-IP ban — while keeping the Veneer session
+  // alive. Logging out on 403 would destroy that recovery path.
+  return e instanceof ApiError && e.status === 401;
 }
 
 function presetToRule(p: SeedPreset): Rule {
@@ -224,7 +231,10 @@ export function RulesPanel({ maxHeight }: { maxHeight?: number | string }) {
     const p = DEFAULT_PRESETS[0];
     setDraft({
       label: "",
-      kind: "any",
+      // Default to the preset's own kind: the seeded numbers are the private
+      // preset's, so "any" would silently create a global catch-all applying
+      // private limits to public torrents too.
+      kind: "private",
       site: "",
       ratioLimit: String(p.ratioLimit),
       seedingTimeLimit: String(p.seedingTimeLimit),
@@ -245,7 +255,7 @@ export function RulesPanel({ maxHeight }: { maxHeight?: number | string }) {
 
   async function saveForm(): Promise<void> {
     if (!draft) return;
-    const id = editingId ?? `rule-${Date.now().toString(36)}`;
+    const id = editingId ?? `rule-${Date.now().toString(36)}-${Math.floor(Math.random() * 0xffffff).toString(36)}`;
     const parsed = draftToRule(draft, id);
     if (parsed.error || !parsed.rule) {
       setFormErr(parsed.error ?? "invalid rule");
@@ -258,21 +268,28 @@ export function RulesPanel({ maxHeight }: { maxHeight?: number | string }) {
       setShowForm(false);
       setDraft(null);
       setEditingId(null);
+      void loadStatus();
     }
   }
 
   async function toggleEnabled(r: Rule): Promise<void> {
-    await persist(rules.map((x) => (x.id === r.id ? { ...x, enabled: !x.enabled } : x)));
+    if (await persist(rules.map((x) => (x.id === r.id ? { ...x, enabled: !x.enabled } : x)))) {
+      void loadStatus();
+    }
   }
 
   async function deleteRule(r: Rule): Promise<void> {
     if (!window.confirm(`Delete rule "${r.label}"?`)) return;
-    await persist(rules.filter((x) => x.id !== r.id));
+    if (await persist(rules.filter((x) => x.id !== r.id))) {
+      void loadStatus();
+    }
   }
 
   async function resetDefaults(): Promise<void> {
     if (!window.confirm("Replace all rules with the seed-preset defaults?")) return;
-    await persist(DEFAULT_PRESETS.map(presetToRule));
+    if (await persist(DEFAULT_PRESETS.map(presetToRule))) {
+      void loadStatus();
+    }
   }
 
   async function applyNow(): Promise<void> {
@@ -285,7 +302,7 @@ export function RulesPanel({ maxHeight }: { maxHeight?: number | string }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
       });
-      setApplyResult({ applied: res.applied, skipped: res.skipped, failed: res.failed ?? 0 });
+      setApplyResult({ applied: res.applied, skipped: res.skipped, failed: res.failed ?? 0, matched: res.matched });
       void loadStatus();
     } catch (e) {
       if (isAuthError(e)) emitUnauthorized();
@@ -295,14 +312,16 @@ export function RulesPanel({ maxHeight }: { maxHeight?: number | string }) {
     }
   }
 
-  const bySite = new Map<string, { total: number; bad: number }>();
+  const bySite = new Map<string, { total: number; bad: number; unmanaged: number }>();
   for (const s of status) {
-    const e = bySite.get(s.site) ?? { total: 0, bad: 0 };
+    const e = bySite.get(s.site) ?? { total: 0, bad: 0, unmanaged: 0 };
     e.total++;
-    if (!isCompliant(s)) e.bad++;
+    if (s.managed === false) e.unmanaged++;
+    else if (!isCompliant(s)) e.bad++;
     bySite.set(s.site, e);
   }
   const nonCompliant = status.filter((s) => !isCompliant(s));
+  const unmanagedCount = status.filter((s) => s.managed === false).length;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, maxHeight, overflowY: maxHeight ? "auto" : undefined }}>
@@ -482,21 +501,32 @@ export function RulesPanel({ maxHeight }: { maxHeight?: number | string }) {
       {!statusErr && !statusLoading && status.length === 0 && <p style={mutedText}>No torrents.</p>}
       {bySite.size > 0 && (
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {[...bySite.entries()].map(([site, c]) => (
-            <span
-              key={site}
-              style={{
-                border: `1px solid ${c.bad > 0 ? colors.warn : colors.border}`,
-                borderRadius: 8,
-                padding: "4px 10px",
-                fontSize: 12,
-                color: colors.text,
-              }}
-            >
-              {site}: {c.total - c.bad}/{c.total} compliant
-            </span>
-          ))}
+          {[...bySite.entries()].map(([site, c]) => {
+            const managed = c.total - c.unmanaged;
+            return (
+              <span
+                key={site}
+                style={{
+                  border: `1px solid ${c.bad > 0 ? colors.warn : colors.border}`,
+                  borderRadius: 8,
+                  padding: "4px 10px",
+                  fontSize: 12,
+                  color: colors.text,
+                }}
+              >
+                {site}: {managed - c.bad}/{managed} compliant
+                {c.unmanaged > 0 ? ` · ${c.unmanaged} unmanaged` : ""}
+              </span>
+            );
+          })}
         </div>
+      )}
+      {unmanagedCount > 0 && (
+        <p style={mutedText}>
+          {unmanagedCount} torrent{unmanagedCount === 1 ? "" : "s"} match{unmanagedCount === 1 ? "es" : ""} no rule and
+          {unmanagedCount === 1 ? " is" : " are"} not enforced — add a rule or a global catch-all to cover{" "}
+          {unmanagedCount === 1 ? "it" : "them"}.
+        </p>
       )}
       {nonCompliant.length > 0 && (
         <div>
@@ -508,6 +538,7 @@ export function RulesPanel({ maxHeight }: { maxHeight?: number | string }) {
             {nonCompliant.slice(0, NON_COMPLIANT_SHOWN).map((s) => (
               <li key={s.hash} title={s.hash}>
                 {s.hash.slice(0, 12)}… ({s.site}
+                {s.managed === false ? ", no rule" : ""}
                 {!s.compliant.ratioOk ? ", ratio" : ""}
                 {!s.compliant.timeOk ? ", time" : ""}
                 {!s.compliant.inactiveOk ? ", inactive" : ""})

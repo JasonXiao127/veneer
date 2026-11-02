@@ -67,7 +67,7 @@ export async function loginQb(
   qbUrl: string,
   username: string,
   password: string
-): Promise<{ ok: boolean; sid?: QbSid; banned?: boolean; body?: string; status?: number }> {
+): Promise<{ ok: boolean; sid?: QbSid; banned?: boolean; body?: string; status?: number; unexpected?: boolean }> {
   const origin = new URL(qbUrl).origin;
   const res = await fetch(`${qbUrl}/api/v2/auth/login`, {
     method: "POST",
@@ -100,21 +100,37 @@ export async function loginQb(
     if (!sid) return { ok: true, body, status: res.status };
     return { ok: true, sid, body, status: res.status };
   }
-  return { ok: false, body, status: res.status };
+  // "Fails." is bad credentials. Any other 200 body (reverse-proxy login
+  // page, captive portal, wrong QB_URL) is a config fault — flag it so the
+  // caller does not burn the shared anti-ban brake on innocent users.
+  if (body === "Fails.") return { ok: false, body, status: res.status };
+  return { ok: false, body, status: res.status, unexpected: true };
 }
 
 export async function qbVersion(qbUrl: string, sid: QbSid): Promise<{ version: string; webapi: string }> {
   const h = qbFetchHeaders(qbUrl, sid);
   const signal = timeoutSignal();
-  const [vRes, wRes] = await Promise.all([
-    fetch(`${qbUrl}/api/v2/app/version`, { headers: h, signal }),
-    fetch(`${qbUrl}/api/v2/app/webapiVersion`, { headers: h, signal }),
+  // Settle (don't Promise.all) so a half-failed probe drains the response
+  // that DID arrive instead of leaking its connection.
+  const [vSettled, wSettled] = await Promise.all([
+    fetch(`${qbUrl}/api/v2/app/version`, { headers: h, signal }).then(
+      (res) => ({ res }),
+      (err: unknown) => ({ err }),
+    ),
+    fetch(`${qbUrl}/api/v2/app/webapiVersion`, { headers: h, signal }).then(
+      (res) => ({ res }),
+      (err: unknown) => ({ err }),
+    ),
   ]);
-  if (vRes.status === 403 || wRes.status === 403) {
+  const vRes = "res" in vSettled ? vSettled.res : undefined;
+  const wRes = "res" in wSettled ? wSettled.res : undefined;
+  if (vRes?.status === 403 || wRes?.status === 403) {
     // Drain both bodies so undici can reuse the connection.
-    await Promise.all([vRes.arrayBuffer().catch(() => undefined), wRes.arrayBuffer().catch(() => undefined)]);
+    await Promise.all([vRes?.arrayBuffer().catch(() => undefined), wRes?.arrayBuffer().catch(() => undefined)]);
     throw Object.assign(new Error("qb forbidden"), { status: 403 });
   }
+  const firstErr = ("err" in vSettled ? vSettled.err : undefined) ?? ("err" in wSettled ? wSettled.err : undefined);
+  if (firstErr !== undefined || !vRes || !wRes) throw firstErr ?? new Error("qb version failed");
   const version = (await vRes.text()).trim();
   const webapi = (await wRes.text()).trim();
   return { version, webapi };

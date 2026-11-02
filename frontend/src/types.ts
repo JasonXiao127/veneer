@@ -62,4 +62,7 @@ export interface MainDataDelta {
   tags?: string[];
   tags_removed?: string[];
   server_state?: Partial<ServerState>;
+  /** Tracker URL -> torrent hashes using it. Present on full updates and when changed. */
+  trackers?: Record<string, string[]>;
+  trackers_removed?: string[];
 }
