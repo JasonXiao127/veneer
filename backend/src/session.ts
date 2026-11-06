@@ -31,6 +31,12 @@ const failMap = new Map<string, FailEntry>();
 // IP sails through untouched.
 const inflight = new Map<string, number>();
 
+/** Test-only reset for the login brake maps. */
+export function _clearLoginBrakeForTests(): void {
+  failMap.clear();
+  inflight.clear();
+}
+
 function pruneFailMap(now: number): void {
   for (const [k, v] of failMap) {
     if (v.blockedUntil <= now && now - v.windowStart > FAIL_WINDOW_MS) failMap.delete(k);
@@ -45,7 +51,7 @@ function pruneFailMap(now: number): void {
   }
 }
 
-function failBlocked(key: string): boolean {
+export function failBlocked(key: string): boolean {
   // Concurrent burst on a clean IP: no failMap entry exists yet, but
   // in-flight attempts already count toward the threshold.
   if ((inflight.get(key) ?? 0) >= FAIL_THRESHOLD) return true;
@@ -62,7 +68,7 @@ function failBlocked(key: string): boolean {
   return false;
 }
 
-function failRecord(key: string, success: boolean): void {
+export function failRecord(key: string, success: boolean): void {
   if (success) {
     failMap.delete(key);
     return;
@@ -117,7 +123,7 @@ function hostnameOf(value: string): string {
   return v.split(":")[0];
 }
 
-function loginSameOrigin(req: FastifyRequest, env: Env): boolean {
+export function loginSameOrigin(req: FastifyRequest, env: Env): boolean {
   const raw = req.headers.origin ?? req.headers.referer;
   if (!raw) return true;
   try {

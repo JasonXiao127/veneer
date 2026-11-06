@@ -38,7 +38,7 @@ function rawQuery(req: FastifyRequest): string {
  * % is allowed so encoded segments (e.g. %2F) pass through untouched — safety
  * comes from the decoded dot/backslash checks below, not from banning %.
  */
-function restInScope(rest: string): boolean {
+export function restInScope(rest: string): boolean {
   // Iterative decode: single decode leaves %252e as "%2e" (still encoded on
   // the wire, harmless) — but decode fully for the safety check so no
   // multi-encoded dot/backslash slips past it.
