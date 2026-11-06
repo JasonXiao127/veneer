@@ -317,7 +317,7 @@ export function RssPanel({ maxHeight = "65vh" }: { maxHeight?: string }) {
                   textOverflow: "ellipsis",
                   textAlign: "left",
                   fontWeight: r.kind === "folder" ? 700 : 400,
-                  borderColor: selected === r.path ? colors.accent : colors.borderStrong,
+                  border: `1px solid ${selected === r.path ? colors.accent : colors.borderStrong}`,
                 }}
                 title={r.path}
                 onClick={() => setSelected(r.kind === "feed" ? r.path : null)}

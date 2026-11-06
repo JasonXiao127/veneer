@@ -286,7 +286,7 @@ const styles: Record<string, React.CSSProperties> = {
     minWidth: 0,
   },
   tabRow: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" },
-  tabOn: { ...btn, borderColor: colors.accent, color: "#fff", background: colors.accent, fontWeight: 600 },
+  tabOn: { ...btn, border: `1px solid ${colors.accent}`, color: "#fff", background: colors.accent, fontWeight: 600 },
   tabOff: { ...btn },
   filters: { display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" },
   scroll: { overflowY: "auto", overflowX: "hidden", minHeight: 120, minWidth: 0 },

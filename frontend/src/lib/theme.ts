@@ -46,7 +46,9 @@ export const btn: CSSProperties = {
 export const btnPrimary: CSSProperties = {
   ...btn,
   background: colors.accent,
-  borderColor: colors.accent,
+  // Full shorthand (not borderColor): btn already sets `border`, and React
+  // warns when shorthand and non-shorthand mix across rerenders.
+  border: `1px solid ${colors.accent}`,
   color: "#fff",
   fontWeight: 600,
 };

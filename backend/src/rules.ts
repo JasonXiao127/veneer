@@ -360,7 +360,10 @@ export interface EnforceResult {
 
 /**
  * Apply enabled rules to one qB session. Drifted torrents get setShareLimits
- * (all three limit fields + shareLimitAction=Default, urlencoded). Throws on
+ * (all three limit fields + shareLimitAction=Default + shareLimitsMode=Default,
+ * urlencoded). shareLimitsMode is required by qB 5.3+ (400 otherwise) and
+ * ignored by older servers (requireParams only checks presence). Default =
+ * inherit the global mode, preserving pre-5.3 behavior. Throws on
  * network/timeout errors so routes can map to 502/504.
  */
 export async function enforceSession(opts: {
@@ -418,6 +421,7 @@ export async function enforceSession(opts: {
           seedingTimeLimit: String(rule.seedingTimeLimit),
           inactiveSeedingTimeLimit: String(rule.inactiveSeedingTimeLimit),
           shareLimitAction: "Default",
+          shareLimitsMode: "Default",
         }).toString(),
         signal: AbortSignal.timeout(15_000),
       });
